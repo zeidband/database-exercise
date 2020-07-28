@@ -1,4 +1,6 @@
 import datetime as dt
+import errno
+import shutil
 import time
 from functools import partial
 from pathlib import Path
@@ -65,8 +67,8 @@ def backup_db() -> Generator[Path, None, None]:
 def test_reload_from_backup(backup_db: Path) -> None:
     """This test requires preparing the backup by calling create_db_backup()"""
     delete_files(DB_ROOT)
-    for path in backup_db.iterdir():
-        (DB_ROOT / path.name).write_bytes(path.read_bytes())
+    DB_ROOT.rmdir()
+    shutil.copytree(str(backup_db), str(DB_ROOT))
     db = DataBase()
     assert db.num_tables() == 1
     assert db.get_tables_names() == ['Students']
