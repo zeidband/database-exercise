@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Type
 from dataclasses_json import dataclass_json
 from db_api import DBTable, DBField, DataBase, SelectionCriteria, DB_ROOT
-
+# TODO: ijson
 import os
 import json
 import shutil
@@ -44,7 +44,16 @@ def get_str(param, operator, value):
     else:
         return result + str(value)
 
-    # return f"\"{param[:-1]}\"" + operator + f"\"{value}\""
+    # return f"\"{param[:-1]}\"" + operator + f"\"{value}\"
+
+
+def get_type(data):
+    if data == "<class 'int'>":
+        return int
+    if data == "<class 'str'>":
+        return str
+    else:
+        return dt.datetime
 
 
 @dataclass_json
@@ -74,12 +83,25 @@ class DBTable(DBTable):
             with open(f"{DB_ROOT}/{self.name}/{self.name}.json", "w", encoding='utf-8') as file:
                 json.dump(file_information, file)
 
-    # TODO: ijson
     def count(self) -> int:
         with open(f"{DB_ROOT}/{self.name}/{self.name}.json", encoding='utf-8') as file:
             file_information = json.load(file)
 
         return file_information["len"]
+
+    def add_to_index(self, values: Dict[str, Any], insert_file):
+        for key in values.keys():
+            if os.path.isfile(f"{DB_ROOT}/{self.name}/{key}-hash_index.json"):
+                with open(f"{DB_ROOT}/{self.name}/{key}-hash_index.json", encoding='utf-8') as f:
+                    my_index = json.load(f)
+
+                if values[key] not in my_index.keys():
+                    my_index.update({values[key]: {}})
+
+                my_index[values[key]].update({values[self.key_field_name]: insert_file})
+
+                with open(f"{DB_ROOT}/{self.name}/{key}-hash_index.json", "w", encoding='utf-8') as f:
+                    json.dump(my_index, f)
 
     def insert_record(self, values: Dict[str, Any]) -> None:
         # check the correctness of the keys
@@ -102,7 +124,7 @@ class DBTable(DBTable):
                 if key == str(values[self.key_field_name]):
                     raise ValueError
 
-            if len(my_data) < 1000 and first:
+            if len(my_data) < 3 and first:
                 first = False
                 insert_file = num
                 insert_data = my_data
@@ -115,6 +137,8 @@ class DBTable(DBTable):
             insert_file = num
             insert_data = {}
 
+        self.add_to_index(values, insert_file)
+
         insert = values.pop(self.key_field_name)
 
         insert_data.update({insert: values})
@@ -124,6 +148,21 @@ class DBTable(DBTable):
 
         self.add_count(1)
 
+    def delete_from_index(self, key: Any, my_data: Dict[str, Any], pop_file: int):
+        for field in my_data.keys():
+            if os.path.isfile(f"{DB_ROOT}/{self.name}/{field}-hash_index.json"):
+                with open(f"{DB_ROOT}/{self.name}/{field}-hash_index.json") as file_index:
+                    my_index = json.load(file_index)
+
+                if my_data[field] in my_index.keys():
+                    if len(my_index[my_data[field]]) == 1:
+                        my_index.pop(my_data[field])
+                    else:
+                        my_index[my_data[field]].pop(str(key))
+
+                    with open(f"{DB_ROOT}/{self.name}/{field}-hash_index.json", "w") as file_index:
+                        json.dump(my_index, file_index)
+
     def delete_record(self, key: Any) -> None:
         num = 1
         while os.path.isfile(f"{DB_ROOT}/{self.name}/{self.name}{num}.json"):
@@ -131,55 +170,72 @@ class DBTable(DBTable):
                 my_data = json.load(f)
 
             if str(key) in my_data.keys():
+                self.delete_from_index(key, my_data[str(key)], num)
                 my_data.pop(str(key))
+
                 with open(f"{DB_ROOT}/{self.name}/{self.name}{num}.json", "w", encoding='utf-8') as file:
                     json.dump(my_data, file, ensure_ascii=False)
                 self.add_count(-1)
+
                 return
             num += 1
 
         raise ValueError
 
-    def get_operation(self, criteria: List[SelectionCriteria], key, row):
+    def exists_the_criteria(self, criteria: List[SelectionCriteria], key, row):
         fields = [field.name for field in self.fields]
-        operation = ""
+
         for criterion in criteria:
             if criterion.operator == "=":
                 criterion.operator = "=="
 
             if criterion.field_name == self.key_field_name:
-                key_type = [field.type for field in self.fields if self.key_field_name == field.name][0]
+                key_type = get_type([field.type for field in self.fields if self.key_field_name == field.name][0])
                 if isinstance(key_type, str):
-                    operation += get_str(key, criterion.operator, criterion.value) + " and "
+                    if not eval(get_str(key, criterion.operator, criterion.value)):
+                        return False
                 # TODO: int
                 #  operation += get_str(get_type(key_type)(key), criterion.operator, criterion.value)
 
                 else:
-                    operation += get_str(int(key), criterion.operator, criterion.value) + " and "
+                    if not eval(get_str(int(key), criterion.operator, criterion.value)):
+                        return False
 
             else:
                 if criterion.field_name in fields:
-                    operation += get_str(row[criterion.field_name], criterion.operator, criterion.value) + " and "
+                    if not eval(get_str(row[criterion.field_name], criterion.operator, criterion.value)):
+                        return False
 
-        return operation[:-4]
+        return True
 
     def delete_records(self, criteria: List[SelectionCriteria]) -> None:
+        # TODO: delete empty files and copy record from the end file to the files that aren't full
         num = 1
-
-        with open(f"{DB_ROOT}/{self.name}/{self.name}{num}.json", encoding='utf-8') as f:
-            my_data = json.load(f)
-
         count = 0
-        deleted_keys = []
 
-        for key, item in my_data.items():
-            if eval(self.get_operation(criteria, key, item)):
-                deleted_keys.append(key)
-                count += 1
+        while os.path.isfile(f"{DB_ROOT}/{self.name}/{self.name}{num}.json"):
+            with open(f"{DB_ROOT}/{self.name}/{self.name}{num}.json", encoding='utf-8') as f:
+                my_data = json.load(f)
+
+            deleted_keys = []
+
+            for key, item in my_data.items():
+                if self.exists_the_criteria(criteria, key, item):
+                    deleted_keys.append(key)
+                    count += 1
+
+            if deleted_keys:
+                for key in deleted_keys:
+                    self.delete_from_index(key, my_data[key], num)
+                    my_data.pop(key)
+
+                with open(f"{DB_ROOT}/{self.name}/{self.name}{num}.json", "w", encoding='utf-8') as f:
+                    json.dump(my_data, f)
+
+            num += 1
 
         self.add_count(-count)
 
-    # TODO: ijson
     def get_record(self, key: Any) -> Dict[str, Any]:
         result = {"id": key}
         num = 1
@@ -195,6 +251,27 @@ class DBTable(DBTable):
 
         raise KeyError
 
+    def update_index(self, key: Any, data: Dict[str, Any], values: Dict[str, Any], file_num: int):
+        for field in values.keys():
+            if os.path.isfile(f"{DB_ROOT}/{self.name}/{field}-hash_index.json"):
+                with open(f"{DB_ROOT}/{self.name}/{field}-hash_index.json") as file_index:
+                    my_index = json.load(file_index)
+
+                if field in data.keys():
+                    if data[field] in my_index.keys():
+                        if len(my_index[data[field]]) == 1:
+                            my_index.pop(data[field])
+                        else:
+                            my_index[data[field]].pop(str(key))
+
+                if values[field] not in my_index.keys():
+                    my_index.update({values[field]: {}})
+
+                my_index[values[field]].update({str(key): file_num})
+
+                with open(f"{DB_ROOT}/{self.name}/{field}-hash_index.json", "w") as file_index:
+                    json.dump(my_index, file_index)
+
     def update_record(self, key: Any, values: Dict[str, Any]) -> None:
         num = 1
         while os.path.isfile(f"{DB_ROOT}/{self.name}/{self.name}{num}.json"):
@@ -202,8 +279,12 @@ class DBTable(DBTable):
                 my_data = json.load(f)
 
             if str(key) in my_data.keys():
+                self.update_index(str(key), my_data[str(key)], values, num)
                 for item in values.keys():
-                    my_data[str(key)][item] = values[item]
+                    if item in my_data[str(key)]:
+                        my_data[str(key)][item] = values[item]
+                    else:
+                        my_data[str(key)].update({item: values[item]})
 
                 with open(f"{DB_ROOT}/{self.name}/{self.name}{num}.json", "w", encoding='utf-8') as file:
                     json.dump(my_data, file, ensure_ascii=False)
@@ -220,26 +301,38 @@ class DBTable(DBTable):
                 my_data = json.load(f)
 
             for key, value in my_data.items():
-                if eval(self.get_operation(criteria, key, value)):
+                if self.exists_the_criteria(criteria, key, value):
                     new_data = {self.key_field_name: key}
                     new_data.update(value)
                     result.append(new_data)
 
-                num += 1
+            num += 1
 
         return result
 
     def create_index(self, field_to_index: str) -> None:
-        raise NotImplementedError
+        if os.path.isfile(f"{DB_ROOT}/{self.name}/{field_to_index}-hash_index.json"):
+            raise IndexError
 
+        if field_to_index != self.key_field_name:
+            num = 1
+            my_index = {}
 
-def get_type(data):
-    if data == "<class 'int'>":
-        return int
-    if data == "<class 'str'>":
-        return str
-    else:
-        return dt.datetime
+            while os.path.isfile(f"{DB_ROOT}/{self.name}/{self.name}{num}.json"):
+                with open(f"{DB_ROOT}/{self.name}/{self.name}{num}.json", encoding='utf-8') as f:
+                    my_data = json.load(f)
+
+                    for key, value in my_data.items():
+                        if field_to_index in value.keys():
+                            if value[field_to_index] not in my_index.keys():
+                                my_index.update({value[field_to_index]: {}})
+
+                            my_index[value[field_to_index]].update({key: num})
+
+                num += 1
+
+            with open(f"{DB_ROOT}/{self.name}/{field_to_index}-hash_index.json", "w", encoding='utf-8') as f:
+                json.dump(my_index, f)
 
 
 @dataclass_json
@@ -308,3 +401,4 @@ class DataBase(DataBase):
             fields_to_join_by: List[str]
     ) -> List[Dict[str, Any]]:
         raise NotImplementedError
+
